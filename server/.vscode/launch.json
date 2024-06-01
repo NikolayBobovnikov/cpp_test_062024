@@ -11,10 +11,11 @@
             "program": "${workspaceFolder}/build/Debug/server.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${fileDirname}",
+            "cwd": "${workspaceFolder}",
             "environment": [],
-            "console": "externalTerminal"
-        }
+            "console":"integratedTerminal",
+            "preLaunchTask": "build"
+          }
 
     ]
 }
