@@ -32,5 +32,5 @@ if(NOT yaml-cpp_POPULATED)
     add_subdirectory(${yaml-cpp_SOURCE_DIR} ${yaml-cpp_BINARY_DIR})
 endif()
 
-add_executable(server src/main.cpp src/server.cpp)
+add_executable(server src/main.cpp src/server.cpp src/session.cpp)
 target_link_libraries(server PUBLIC yaml-cpp::yaml-cpp) # The library or executable that require yaml-cpp library
