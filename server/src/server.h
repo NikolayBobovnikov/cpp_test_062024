@@ -14,6 +14,8 @@
 #include <boost/asio.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include "helpers.h"
+
 using boost::asio::ip::tcp;
 
 class Server
@@ -76,8 +78,20 @@ private:
 			YAML::Node config = YAML::LoadFile(configFile);
 			m_host = config["server"]["host"].as<std::string>();
 			m_port = config["server"]["port"].as<int>();
-			m_statsTimeout = config["server"]["stats_timeout"].as<int>(5); // default to 5 seconds if not specified
-			m_keyValuesFile = config["server"]["key_values_file"].as<std::string>();
+
+			// default to 5 seconds if not specified
+			m_statsTimeout = config["server"]["stats_timeout"].as<int>(5);
+
+			// key values file is relative to the current path in "conf" subdir
+			auto keyValuesFilePath = std::filesystem::current_path() /=
+				config["server"]["key_values_file"].as<std::string>();
+
+			if(!std::filesystem::exists(keyValuesFilePath))
+			{
+				throw std::invalid_argument(string_format("File %s not found", keyValuesFilePath.c_str()));
+			}
+
+			m_keyValuesFile = keyValuesFilePath.string();
 		}
 		catch(const YAML::Exception& e)
 		{
@@ -88,8 +102,7 @@ private:
 
 	void _loadKeyValues()
 	{
-		auto keyValuesFile = std::filesystem::current_path() /= m_keyValuesFile;
-		std::ifstream file(keyValuesFile.string());
+		std::ifstream file(m_keyValuesFile);
 		std::string line;
 		while(std::getline(file, line))
 		{
@@ -110,14 +123,39 @@ private:
 			std::unique_lock<std::shared_mutex> lock(m_configMutex);
 			m_cv.wait(lock, [this] { return m_updatePending; });
 
-			std::ofstream file(m_keyValuesFile);
-			for(const auto& kv : m_config)
+			std::string tempFileName = m_keyValuesFile + ".tmp";
+			std::ofstream tempFile(tempFileName);
+			if(!tempFile)
 			{
-				file << kv.first << "=" << kv.second << "\n";
+				std::cerr << "Failed to open temporary file for writing: " << tempFileName << std::endl;
+				continue;
 			}
-			m_updatePending = false;
+
+			ScopeGuard deleteTempFile([&tempFileName] { std::filesystem::remove(tempFileName); });
+
+			try
+			{
+				for(const auto& kv : m_config)
+				{
+					tempFile << kv.first << "=" << kv.second << "\n";
+				}
+				tempFile.close();
+
+				// Replace the original file with the temporary file
+				std::filesystem::rename(tempFileName, m_keyValuesFile);
+
+				// If no exception, dismiss the scope guard to avoid deletion of temp file
+				deleteTempFile.dismiss();
+
+				m_updatePending = false;
+			}
+			catch(const std::exception& e)
+			{
+				std::cerr << "Exception occurred while writing to file: " << e.what() << std::endl;
+			}
 		}
 	}
+
 
 	void _handleClient(tcp::socket socket)
 	{
