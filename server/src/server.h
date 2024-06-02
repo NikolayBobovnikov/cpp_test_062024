@@ -22,6 +22,11 @@ class Server
 {
 public:
 	Server(const std::string& configFile)
+		: m_updatePending(false)
+		, m_getRequestCount(0)
+		, m_setRequestCount(0)
+		, m_recentGetRequestCount(0)
+		, m_recentSetRequestCount(0)
 	{
 		_loadServerConfig(configFile);
 		_loadKeyValues();
@@ -33,6 +38,7 @@ public:
 	{
 		m_fileWriter = std::thread(&Server::_writeFile, this);
 		m_statsLogger = std::thread(&Server::_logStatistics, this);
+		m_setRequestWorker = std::thread(&Server::_processSetRequests, this);
 
 		_acceptClients();
 
@@ -48,6 +54,7 @@ public:
 
 		m_fileWriter.join();
 		m_statsLogger.join();
+		m_setRequestWorker.join();
 	}
 
 private:
@@ -68,8 +75,11 @@ private:
 	std::vector<std::thread> m_clientThreads;
 	std::thread m_fileWriter;
 	std::thread m_statsLogger;
+	std::thread m_setRequestWorker;
 	boost::asio::io_context m_ioContext;
 	std::unique_ptr<tcp::acceptor> m_acceptor;
+
+	ThreadSafeQueue<std::pair<std::string, std::string>> m_setRequestQueue;
 
 	void _loadServerConfig(const std::string& configFile)
 	{
@@ -156,6 +166,20 @@ private:
 		}
 	}
 
+	void _processSetRequests()
+	{
+		while(true)
+		{
+			auto request = m_setRequestQueue.pop();
+			{
+				std::unique_lock<std::shared_mutex> lock(m_configMutex);
+				m_config[request.first] = request.second;
+				m_keyStats[request.first].second++;
+				m_updatePending = true;
+				m_cv.notify_one();
+			}
+		}
+	}
 
 	void _handleClient(tcp::socket socket)
 	{
@@ -205,14 +229,8 @@ private:
 					{
 						std::string key = command.substr(commandLength, pos - commandLength);
 						std::string value = command.substr(pos + 1);
-						{
-							std::unique_lock<std::shared_mutex> lock(m_configMutex);
-							m_config[key] = value;
-							m_keyStats[key].second++;
-							m_updatePending = true;
-							m_cv.notify_one();
-						}
-						response = "Set successful";
+						m_setRequestQueue.push({key, value});
+						response = "Set request queued";
 						m_setRequestCount++;
 						m_recentSetRequestCount++;
 					}

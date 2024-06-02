@@ -1,9 +1,11 @@
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <ostream>
+#include <queue>
 #include <string>
-
 
 template <typename... Args>
 std::string string_format(const std::string& format, Args... args)
@@ -37,4 +39,31 @@ public:
 private:
 	std::function<void()> onExitScope_;
 	bool dismissed_;
+};
+
+
+template <typename T>
+class ThreadSafeQueue
+{
+public:
+	void push(T value)
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		queue_.push(std::move(value));
+		cond_var_.notify_one();
+	}
+
+	T pop()
+	{
+		std::unique_lock<std::mutex> lock(mutex_);
+		cond_var_.wait(lock, [this] { return !queue_.empty(); });
+		T value = std::move(queue_.front());
+		queue_.pop();
+		return value;
+	}
+
+private:
+	std::queue<T> queue_;
+	std::mutex mutex_;
+	std::condition_variable cond_var_;
 };
