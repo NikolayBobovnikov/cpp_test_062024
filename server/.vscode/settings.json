@@ -66,6 +66,21 @@
         "xloctime": "cpp",
         "xmemory": "cpp",
         "xtr1common": "cpp",
-        "xutility": "cpp"
+        "xutility": "cpp",
+        "any": "cpp",
+        "array": "cpp",
+        "deque": "cpp",
+        "functional": "cpp",
+        "map": "cpp",
+        "queue": "cpp",
+        "ranges": "cpp",
+        "set": "cpp",
+        "shared_mutex": "cpp",
+        "span": "cpp",
+        "stack": "cpp",
+        "unordered_set": "cpp",
+        "valarray": "cpp",
+        "variant": "cpp",
+        "xtree": "cpp"
     }
 }
