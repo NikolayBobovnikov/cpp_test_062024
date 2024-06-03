@@ -36,22 +36,21 @@ public:
 private:
     std::string m_host;
     int m_port;
-    int m_statsTimeout;
-    int m_fileWriteTimeout;
+    size_t m_statsTimeout;
+    size_t m_fileWriteTimeout;
     std::string m_keyValuesFile;
     std::unordered_map<std::string, std::string> m_config;
     // stats per key requests: first - get, second - set
     std::unordered_map<std::string, std::pair<int, int>> m_keyStats;
     std::shared_mutex m_configMutex;
-    std::condition_variable_any m_cv;
+    std::condition_variable_any m_setRequestQueuedCv;
     std::condition_variable_any m_writeCompletedCv;
-    bool m_updatePending;
-    bool m_writeInProgress;
-    std::atomic<int> m_getRequestCount;
-    std::atomic<int> m_setRequestCount;
-    std::atomic<int> m_recentGetRequestCount;
-    std::atomic<int> m_recentSetRequestCount;
-    std::vector<std::thread> m_clientThreads;
+    std::atomic<bool> m_updatePending{false};
+    std::atomic<bool> m_writeInProgress{false};
+    std::atomic<size_t> m_getRequestCount;
+    std::atomic<size_t> m_setRequestCount;
+    std::atomic<size_t> m_recentGetRequestCount;
+    std::atomic<size_t> m_recentSetRequestCount;
     std::thread m_fileWriter;
     std::thread m_statsLogger;
     std::thread m_setRequestWorker;

@@ -1,4 +1,5 @@
 #include <rapidjson/document.h>
+#include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
@@ -101,7 +102,7 @@ void Server::handle_request(std::string_view command, std::string& response)
             std::string_view value = command.substr(pos + 1);
             auto keystring = std::string(key);
             response = "OK";
-            // m_keyStats[keystring].second++;
+            m_keyStats[keystring].second++;
             m_setRequestCount++;
             m_recentSetRequestCount++;
             m_setRequestQueue.push({keystring, std::string(value)});
@@ -130,12 +131,19 @@ void Server::_loadServerConfig(const std::string& configFile)
         m_fileWriteTimeout = config["server"]["file_write_timeout"].as<int>(5);
 
         // key values file is relative to the current path in "conf" subdir
-        auto keyValuesFilePath = std::filesystem::current_path() /=
+        auto keyValuesFilePath = std::filesystem::path(configFile).parent_path() /=
             config["server"]["key_values_file"].as<std::string>();
+
+        std::filesystem::create_directories(keyValuesFilePath.parent_path());
 
         if(!std::filesystem::exists(keyValuesFilePath))
         {
-            throw std::invalid_argument("File " + keyValuesFilePath.string() + " not found");
+            std::ofstream keyValuesFile(keyValuesFilePath.string());
+            if(!keyValuesFile)
+            {
+                throw std::runtime_error("Failed to create file: " + keyValuesFilePath.string());
+            }
+            keyValuesFile.close();
         }
 
         m_keyValuesFile = keyValuesFilePath.string();
@@ -150,70 +158,91 @@ void Server::_loadServerConfig(const std::string& configFile)
 void Server::_loadKeyValues()
 {
     std::ifstream file(m_keyValuesFile);
-    std::string line;
-    while(std::getline(file, line))
+    if(!file.is_open())
     {
-        auto pos = line.find('=');
-        if(pos != std::string::npos)
+        std::cerr << "Failed to open key values file: " << m_keyValuesFile << std::endl;
+        return;
+    }
+
+    std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+
+    rapidjson::Document doc;
+
+    if(json.empty())
+    {
+        std::cerr << "Key values file is empty, creating empty JSON." << std::endl;
+        doc.SetObject();
+        std::ofstream outFile(m_keyValuesFile);
+        if(!outFile.is_open())
         {
-            std::string key = line.substr(0, pos);
-            std::string value = line.substr(pos + 1);
+            std::cerr << "Failed to open key values file for writing: " << m_keyValuesFile << std::endl;
+            return;
+        }
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        doc.Accept(writer);
+        outFile << buffer.GetString();
+        outFile.close();
+    }
+    else
+    {
+        if(doc.Parse(json.c_str()).HasParseError())
+        {
+            std::cerr << "Error parsing key values file: " << m_keyValuesFile << std::endl;
+            return;
+        }
+
+        for(auto itr = doc.MemberBegin(); itr != doc.MemberEnd(); ++itr)
+        {
+            std::string key = itr->name.GetString();
+            std::string value = itr->value.GetString();
             m_config[key] = value;
         }
     }
 }
-
 void Server::_writeFile()
 {
     while(true)
     {
         std::this_thread::sleep_for(std::chrono::seconds(m_fileWriteTimeout));
         std::unique_lock<std::shared_mutex> lock(m_configMutex);
-        m_cv.wait(lock, [this] { return m_updatePending; });
-
+        m_setRequestQueuedCv.wait(lock, [this] { return m_updatePending.load(); });
         m_writeInProgress = true;
+        rapidjson::Document doc;
+        doc.SetObject();
+        rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
 
-        std::string tempFileName = m_keyValuesFile + ".tmp";
-        std::ofstream tempFile(tempFileName);
-        if(!tempFile)
+        for(const auto& kv : m_config)
         {
-            std::cerr << "Failed to open temporary file for writing: " << tempFileName << std::endl;
+            doc.AddMember(rapidjson::StringRef(kv.first.c_str()), rapidjson::StringRef(kv.second.c_str()), allocator);
+        }
+
+        rapidjson::StringBuffer buffer;
+        rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+        doc.Accept(writer);
+
+        std::ofstream keyValuesFile(m_keyValuesFile);
+        if(!keyValuesFile.is_open())
+        {
+            std::cerr << "Failed to open temporary file for writing: " << m_keyValuesFile << std::endl;
             continue;
         }
 
-        ScopeGuard deleteTempFile([&tempFileName] { std::filesystem::remove(tempFileName); });
+        keyValuesFile << buffer.GetString();
+        keyValuesFile.close();
 
-        try
+        if(keyValuesFile.fail())
         {
-            for(const auto& kv : m_config)
-            {
-                tempFile << kv.first << "=" << kv.second << "\n";
-            }
-            tempFile.close(); // Ensure the file is closed before renaming
-
-            // Check for errors in closing the file
-            if(tempFile.fail())
-            {
-                std::cerr << "Error occurred while closing the temporary file: " << tempFileName << std::endl;
-                continue;
-            }
-
-            // Replace the original file with the temporary file
-            std::filesystem::rename(tempFileName, m_keyValuesFile);
-
-            // If no exception, dismiss the scope guard to avoid deletion
-            deleteTempFile.dismiss();
-
-            m_updatePending = false;
-            m_writeInProgress = false;
-
-            // Notify set request processing thread that the file write is completed
-            m_writeCompletedCv.notify_all();
+            std::cerr << "Error while closing the temporary file: " << m_keyValuesFile << std::endl;
+            continue;
         }
-        catch(const std::exception& e)
-        {
-            std::cerr << "Exception occurred while writing to file: " << e.what() << std::endl;
-        }
+
+        m_updatePending = false;
+        m_writeInProgress = false;
+
+        // Notify set request processing thread that the file write is completed
+        m_writeCompletedCv.notify_all();
     }
 }
 
@@ -224,15 +253,10 @@ void Server::_processSetRequests()
         auto request = m_setRequestQueue.pop();
         {
             std::unique_lock<std::shared_mutex> lock(m_configMutex);
-            // Wait until the file write is completed
             m_writeCompletedCv.wait(lock, [this] { return !m_writeInProgress; });
-
-            m_config.insert_or_assign(request.first, request.second);
+            m_config[request.first] = request.second;
             m_updatePending = true;
-            m_keyStats[request.first].second++;
-
-            // Notify the file write thread
-            m_cv.notify_one();
+            m_setRequestQueuedCv.notify_one();
         }
     }
 }
@@ -259,35 +283,36 @@ void Server::_logStatistics()
         int recentSetRequests = m_recentSetRequestCount.exchange(0);
 
         std::cout << "==================== Request statistics ====================\n";
-        std::cout << "Get Requests in last " << m_statsTimeout << " seconds: " << recentGetRequests << "\n";
-        std::cout << "Set Requests in last " << m_statsTimeout << " seconds: " << recentSetRequests << "\n";
-        std::cout << "Total Get Requests: " << totalGetRequests << "\n";
-        std::cout << "Total Set Requests: " << totalSetRequests << "\n";
+        std::cout << "Get Requests (in last " << m_statsTimeout << " seconds): " << recentGetRequests << "\n";
+        std::cout << "Set Requests (in last " << m_statsTimeout << " seconds): " << recentSetRequests << "\n";
+        std::cout << "Get Requests (total): " << totalGetRequests << "\n";
+        std::cout << "Set Requests (total): " << totalSetRequests << "\n";
         _printStatisticsTable();
     }
 }
 
 void Server::_printStatisticsTable()
 {
+    static const int width = 10;
     std::ostringstream oss;
-    oss << std::setw(10) << "Request" << " |";
+    oss << "|" << std::setw(width) << "Request" << " |";
     for(const auto& kv : m_keyStats)
     {
-        oss << std::setw(7) << kv.first << " |";
+        oss << std::setw(width) << kv.first << " |";
     }
     oss << "\n";
 
-    oss << std::setw(10) << "Get" << " |";
+    oss << "|" << std::setw(width) << "Get" << " |";
     for(const auto& kv : m_keyStats)
     {
-        oss << std::setw(7) << kv.second.first << " |";
+        oss << std::setw(width) << kv.second.first << " |";
     }
     oss << "\n";
 
-    oss << std::setw(10) << "Set" << " |";
+    oss << "|" << std::setw(width) << "Set" << " |";
     for(const auto& kv : m_keyStats)
     {
-        oss << std::setw(7) << kv.second.second << " |";
+        oss << std::setw(width) << kv.second.second << " |";
     }
     oss << "\n";
 

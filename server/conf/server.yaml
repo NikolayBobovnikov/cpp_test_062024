@@ -3,4 +3,4 @@ server:
   port: 12345
   stats_timeout: 5
   file_write_timeout: 1
-  key_values_file: "conf/values.txt"
+  key_values_file: "values.json"

@@ -25,7 +25,11 @@ void Session::_read()
                                  }
                                  else if(ec == boost::asio::error::eof)
                                  {
-                                     std::cout << "Client disconnected\n";
+                                     std::cout << "Client disconnected.\n";
+                                 }
+                                 else if(ec == boost::asio::error::connection_reset)
+                                 {
+                                     std::cout << "Client disconnected forcibly.\n";
                                  }
                                  else
                                  {
