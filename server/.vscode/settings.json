@@ -81,6 +81,8 @@
         "unordered_set": "cpp",
         "valarray": "cpp",
         "variant": "cpp",
-        "xtree": "cpp"
+        "xtree": "cpp",
+        "codecvt": "cpp",
+        "regex": "cpp"
     }
 }

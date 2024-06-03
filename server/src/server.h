@@ -12,6 +12,7 @@
 #include <queue>
 #include <shared_mutex>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -30,16 +31,16 @@ public:
     ~Server();
 
     void start();
-
-    void handle_request(char* data, std::size_t length, std::string& response);
+    void handle_request(std::string_view data, std::string& response);
 
 private:
     std::string m_host;
     int m_port;
     int m_statsTimeout;
+    int m_fileWriteTimeout;
     std::string m_keyValuesFile;
-
     std::unordered_map<std::string, std::string> m_config;
+    // stats per key requests: first - get, second - set
     std::unordered_map<std::string, std::pair<int, int>> m_keyStats;
     std::shared_mutex m_configMutex;
     std::condition_variable_any m_cv;
@@ -56,20 +57,13 @@ private:
     std::thread m_setRequestWorker;
     boost::asio::io_context m_ioContext;
     tcp::acceptor m_acceptor;
-
     ThreadSafeQueue<std::pair<std::string, std::string>> m_setRequestQueue;
 
     void _loadServerConfig(const std::string& configFile);
-
     void _loadKeyValues();
-
     void _writeFile();
-
     void _processSetRequests();
-
-    void acceptClientConnections();
-
+    void _acceptClientConnections();
     void _logStatistics();
-
     void _printStatisticsTable();
 };

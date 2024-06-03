@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <ostream>
 #include <queue>
 #include <string>
+#include <string_view>
 
 template <typename... Args>
 std::string string_format(const std::string& format, Args... args)
@@ -69,3 +71,13 @@ private:
     std::mutex mutex_;
     std::condition_variable cond_var_;
 };
+
+using namespace std::string_view_literals;
+
+// std::unique_ptr<const char[]> conv(std::string_view sv)
+// {
+//     std::unique_ptr<char[]> p(new char[sv.size() + 1]);
+//     std::memcpy(p.get(), sv.data(), sv.size());
+//     p[sv.size()] = '\0';
+//     return std::move(p);
+// }
