@@ -66,18 +66,16 @@ public:
         return value;
     }
 
+    bool empty() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
 private:
     std::queue<T> queue_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cond_var_;
 };
 
 using namespace std::string_view_literals;
-
-// std::unique_ptr<const char[]> conv(std::string_view sv)
-// {
-//     std::unique_ptr<char[]> p(new char[sv.size() + 1]);
-//     std::memcpy(p.get(), sv.data(), sv.size());
-//     p[sv.size()] = '\0';
-//     return std::move(p);
-// }

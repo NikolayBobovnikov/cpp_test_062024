@@ -1,10 +1,20 @@
-#include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
 #include "server.h"
 #include "session.h"
+
+namespace
+{
+void finish(std::thread& thread)
+{
+    if(thread.joinable())
+    {
+        thread.join();
+    }
+}
+} // namespace
 
 Server::Server(const std::string& configFile)
     : m_updatePending(false)
@@ -26,25 +36,40 @@ Server::Server(const std::string& configFile)
 
 Server::~Server()
 {
+    shutdown();
+}
+
+void Server::shutdown()
+{
+    if(!m_running)
+        return;
+
+    m_running = false;
+
+    // Stop accepting new connections
     m_ioContext.stop();
 
-    if(m_fileWriter.joinable())
-    {
-        m_fileWriter.join();
-    }
-    if(m_statsLogger.joinable())
-    {
-        m_statsLogger.join();
-    }
-    if(m_setRequestWorker.joinable())
-    {
-        m_setRequestWorker.join();
-    }
+    // Stop timer starting file write
+    finish(m_timerThread);
+
+    // notify possibly blocked threads
+    m_writeFileCv.notify_all();
+    m_processSetRequestsCv.notify_all();
+
+    // stop stats
+    finish(m_statsLogger);
+
+    // finish processing remaining set requests, if any, and exit
+    finish(m_setRequestWorker);
+
+    // finish writing to file, if needed, and exit
+    finish(m_fileWriter);
 }
 
 void Server::start()
 {
-    m_fileWriter = std::thread(&Server::_writeFile, this);
+    m_timerThread = std::thread(&Server::_timerLoop, this);
+    m_fileWriter = std::thread(&Server::_writeFileLoop, this);
     m_statsLogger = std::thread(&Server::_logStatistics, this);
     m_setRequestWorker = std::thread(&Server::_processSetRequests, this);
     _acceptClientConnections();
@@ -63,22 +88,28 @@ void Server::handle_request(std::string_view command, std::string& response)
             auto it = m_config.find(std::string(key));
             if(it != m_config.end())
             {
-                // Create a JSON document
                 rapidjson::Document doc;
                 doc.SetObject();
                 rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
 
-                // Add key-value pair
-                doc.AddMember(
+                // nested object for the values
+                rapidjson::Value valuesObject(rapidjson::kObjectType);
+                valuesObject.AddMember(
                     rapidjson::StringRef(key.data(), key.size()), rapidjson::StringRef(it->second.c_str()), allocator);
 
-                // Add statistics
-                auto& stats = m_keyStats[std::string(key)];
-                stats.first++;
-                doc.AddMember("reads", stats.first, allocator);
-                doc.AddMember("writes", stats.second, allocator);
+                rapidjson::Value statsObject(rapidjson::kObjectType);
+                {
+                    std::unique_lock<std::shared_mutex> statsLock(m_keyStatsMutex);
+                    auto& stats = m_keyStats[std::string(key)];
+                    stats.first++;
+                    statsObject.AddMember("reads", stats.first, allocator);
+                    statsObject.AddMember("writes", stats.second, allocator);
+                }
 
-                // Convert JSON document to string
+                // Add the values and statistics to the main object
+                doc.AddMember("values", valuesObject, allocator);
+                doc.AddMember("statistics", statsObject, allocator);
+
                 rapidjson::StringBuffer buffer;
                 rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
                 doc.Accept(writer);
@@ -102,7 +133,10 @@ void Server::handle_request(std::string_view command, std::string& response)
             std::string_view value = command.substr(pos + 1);
             auto keystring = std::string(key);
             response = "OK";
-            m_keyStats[keystring].second++;
+            {
+                std::unique_lock<std::shared_mutex> statsLock(m_keyStatsMutex);
+                m_keyStats[keystring].second++;
+            }
             m_setRequestCount++;
             m_recentSetRequestCount++;
             m_setRequestQueue.push({keystring, std::string(value)});
@@ -116,6 +150,11 @@ void Server::handle_request(std::string_view command, std::string& response)
     {
         response = "Unknown command";
     }
+}
+
+bool Server::is_running() const
+{
+    return m_running;
 }
 
 void Server::_loadServerConfig(const std::string& configFile)
@@ -201,64 +240,93 @@ void Server::_loadKeyValues()
         }
     }
 }
-void Server::_writeFile()
+
+void Server::_timerLoop()
 {
-    while(true)
+    while(m_running)
     {
         std::this_thread::sleep_for(std::chrono::seconds(m_fileWriteTimeout));
-        std::unique_lock<std::shared_mutex> lock(m_configMutex);
-        m_setRequestQueuedCv.wait(lock, [this] { return m_updatePending.load(); });
-        m_writeInProgress = true;
-        rapidjson::Document doc;
-        doc.SetObject();
-        rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
+        m_timerFired = true;
+        m_writeFileCv.notify_all();
+    }
+}
 
-        for(const auto& kv : m_config)
+void Server::_writeFileLoop()
+{
+    while(m_running || m_updatePending)
+    {
+        auto doc = _prepareJson();
+
         {
-            doc.AddMember(rapidjson::StringRef(kv.first.c_str()), rapidjson::StringRef(kv.second.c_str()), allocator);
+            std::shared_lock<std::shared_mutex> lock(m_configMutex);
+            m_writeFileCv.wait(lock, [this] { return !m_running || m_timerFired; });
+            _fillJson(doc);
         }
 
-        rapidjson::StringBuffer buffer;
-        rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
-        doc.Accept(writer);
-
-        std::ofstream keyValuesFile(m_keyValuesFile);
-        if(!keyValuesFile.is_open())
-        {
-            std::cerr << "Failed to open temporary file for writing: " << m_keyValuesFile << std::endl;
-            continue;
-        }
-
-        keyValuesFile << buffer.GetString();
-        keyValuesFile.close();
-
-        if(keyValuesFile.fail())
-        {
-            std::cerr << "Error while closing the temporary file: " << m_keyValuesFile << std::endl;
-            continue;
-        }
-
+        _writeJson(doc);
         m_updatePending = false;
-        m_writeInProgress = false;
+        m_timerFired = false;
+        m_processSetRequestsCv.notify_all();
+    }
+}
 
-        // Notify set request processing thread that the file write is completed
-        m_writeCompletedCv.notify_all();
+rapidjson::Document Server::_prepareJson() const
+{
+    rapidjson::Document doc;
+    doc.SetObject();
+    return doc;
+}
+
+void Server::_fillJson(rapidjson::Document& doc) const
+{
+    auto& allocator = doc.GetAllocator();
+    for(const auto& kv : m_config)
+    {
+        doc.AddMember(rapidjson::StringRef(kv.first.c_str()), rapidjson::StringRef(kv.second.c_str()), allocator);
+    }
+}
+
+
+void Server::_writeJson(const rapidjson::Document& doc) const
+{
+    rapidjson::StringBuffer buffer;
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    doc.Accept(writer);
+
+    std::ofstream keyValuesFile(m_keyValuesFile);
+    if(!keyValuesFile.is_open())
+    {
+        std::cerr << "Failed to open key values file for writing: " << m_keyValuesFile << std::endl;
+        return;
+    }
+
+    keyValuesFile << buffer.GetString();
+    keyValuesFile.close();
+
+    if(keyValuesFile.fail())
+    {
+        std::cerr << "Error while closing the key values file: " << m_keyValuesFile << std::endl;
+        return;
     }
 }
 
 void Server::_processSetRequests()
 {
-    while(true)
+    while(m_running || !m_setRequestQueue.empty())
     {
         auto request = m_setRequestQueue.pop();
         {
             std::unique_lock<std::shared_mutex> lock(m_configMutex);
-            m_writeCompletedCv.wait(lock, [this] { return !m_writeInProgress; });
+            m_processSetRequestsCv.wait(lock, [this] { return !m_running || !m_updatePending; });
             m_config[request.first] = request.second;
             m_updatePending = true;
-            m_setRequestQueuedCv.notify_one();
         }
+
+        // don't notify the file writer thread during normal operation
     }
+
+    // notify file writing thread to save latest changes before shutdown
+    m_writeFileCv.notify_all();
 }
 
 void Server::_acceptClientConnections()
@@ -274,7 +342,7 @@ void Server::_acceptClientConnections()
 
 void Server::_logStatistics()
 {
-    while(true)
+    while(m_running)
     {
         std::this_thread::sleep_for(std::chrono::seconds(m_statsTimeout));
         int totalGetRequests = m_getRequestCount.load();
@@ -295,22 +363,38 @@ void Server::_printStatisticsTable()
 {
     static const int width = 10;
     std::ostringstream oss;
-    oss << "|" << std::setw(width) << "Request" << " |";
-    for(const auto& kv : m_keyStats)
+    std::vector<std::pair<std::string, std::pair<int, int>>> stats;
+
+    // populate the local stats array while holding the shared lock
+    {
+        std::shared_lock<std::shared_mutex> lock(m_keyStatsMutex);
+        stats.reserve(m_keyStats.size());
+        for(const auto& kv : m_keyStats)
+        {
+            stats.emplace_back(kv.first, kv.second);
+        }
+    }
+
+    // print
+    oss << "|" << std::setw(width) << "Request"
+        << " |";
+    for(const auto& kv : stats)
     {
         oss << std::setw(width) << kv.first << " |";
     }
     oss << "\n";
 
-    oss << "|" << std::setw(width) << "Get" << " |";
-    for(const auto& kv : m_keyStats)
+    oss << "|" << std::setw(width) << "Get"
+        << " |";
+    for(const auto& kv : stats)
     {
         oss << std::setw(width) << kv.second.first << " |";
     }
     oss << "\n";
 
-    oss << "|" << std::setw(width) << "Set" << " |";
-    for(const auto& kv : m_keyStats)
+    oss << "|" << std::setw(width) << "Set"
+        << " |";
+    for(const auto& kv : stats)
     {
         oss << std::setw(width) << kv.second.second << " |";
     }

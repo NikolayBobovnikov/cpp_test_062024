@@ -4,6 +4,7 @@ project(server)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(BOOST_ROOT "C:/nx/3rdparty/boost_1_85_0")
 
 # Find Boost libraries
 # set(Boost_USE_STATIC_LIBS OFF)

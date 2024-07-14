@@ -8,14 +8,13 @@
             "name": "server",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/server.exe",
+            "program": "${workspaceFolder}/build/server.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
-            "console":"integratedTerminal",
-            "preLaunchTask": "build"
-          }
-
+            "console": "integratedTerminal",
+            // "preLaunchTask": "build"
+        }
     ]
 }

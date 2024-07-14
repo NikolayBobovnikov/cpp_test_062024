@@ -1,5 +1,4 @@
 {
-    "cmake.generator": "Visual Studio 17 2022",
     "files.associations": {
         "utility": "cpp",
         "xstring": "cpp",
@@ -83,6 +82,9 @@
         "variant": "cpp",
         "xtree": "cpp",
         "codecvt": "cpp",
-        "regex": "cpp"
-    }
+        "regex": "cpp",
+        "xstddef": "cpp"
+    },
+    "cmake.generator": "Ninja",
+    "editor.formatOnSave": true
 }
