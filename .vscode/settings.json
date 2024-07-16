@@ -1,5 +1,4 @@
 {
-    "cmake.generator": "Visual Studio 17 2022",
     "files.associations": {
         "utility": "cpp",
         "xstring": "cpp",

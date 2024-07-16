@@ -14,14 +14,19 @@ void Session::start()
 
 void Session::_read()
 {
+    if(!m_server.is_running())
+    {
+        return;
+    }
+
     auto self(shared_from_this());
     m_socket.async_read_some(boost::asio::buffer(m_data),
                              [this, self](boost::system::error_code ec, std::size_t length) {
                                  if(!ec)
                                  {
-                                     std::string_view command(m_data.data(), length);
-                                     m_server.handle_request(command, m_response);
-                                     _write();
+                                     m_buffer.append(m_data.data(), length);
+                                     _processBuffer();
+                                     _read();
                                  }
                                  else if(ec == boost::asio::error::eof)
                                  {
@@ -38,15 +43,30 @@ void Session::_read()
                              });
 }
 
+void Session::_processBuffer()
+{
+    std::size_t pos;
+    while((pos = m_buffer.find('\n')) != std::string::npos)
+    {
+        std::string command = m_buffer.substr(0, pos);
+        m_buffer.erase(0, pos + 1);
+
+        m_server.handle_request(command, m_response);
+        _write();
+    }
+}
+
+
 void Session::_write()
 {
+    if(!m_server.is_running())
+    {
+        return;
+    }
+
     auto self(shared_from_this());
     auto handleWriteResult = [this, self](boost::system::error_code ec, std::size_t /*length*/) {
-        if(!ec)
-        {
-            _read();
-        }
-        else
+        if(ec)
         {
             std::cerr << "Error on send: " << ec.message() << "\n";
         }

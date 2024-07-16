@@ -16,6 +16,7 @@ public:
 
 private:
     void _read();
+    void _processBuffer();
     void _write();
 
     tcp::socket m_socket;
@@ -23,4 +24,5 @@ private:
     static constexpr std::size_t max_length = 1024;
     std::array<char, max_length> m_data;
     std::string m_response;
+    std::string m_buffer;
 };
